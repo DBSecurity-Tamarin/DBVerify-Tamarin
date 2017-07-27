@@ -1,0 +1,226 @@
+/* Implementation of the Meadows distance bounding protocol */
+/* Demonstrating the DB-secure property */
+
+theory meadows
+
+begin
+
+functions: h/4, f/3, j/4, g/3
+
+builtins: symmetric-encryption, signing
+
+// -------------------- Tag Initialization -------------------- //
+
+// This protocol uses the XOR function, which Tamarin cannot
+// thoroughly model. We note that a later message includes xor(a,b),
+// where b is an arbitrary nonce. Hence, we will model
+// the agent name <P, n> as xor(P,n). Later on, we will have
+// that f(<P,n>, <a,n>) = f(P, a) by defining two 'equivalent' rules
+
+rule Register_Keypair:
+  [ Fr(~key) ]
+--[ KeyGen($P, $V, ~key) ,Once($P, $V), Prelim(), Prover($P), Verifier($V)]->
+  [ !SharedKey($P, $V, ~key), !Agent($P), !Agent($V) ]
+
+rule Register_Dirty_Keypair:
+  [ Fr(~key), Fr(~n) ]
+--[ DirtyKeyGen($P, $V, ~key) ,Once(<$P, ~n>, $V), Prelim(),
+    Corrupted(<$P, ~n>, $V), Prover(<$P, ~n>), Verifier($V) ]->
+  [ !SharedKey(<$P, ~n>, $V, ~key), !Agent(<$P, ~n>), !Agent($V) ]
+
+rule Corrupt_Prover:
+  [ !SharedKey(prover, verifier, key) ]
+--[ Corrupted(prover, verifier), Prelim(), Corrupt(prover) ]->
+  [ Out(key), !CorruptAgent(prover) ]
+
+rule Corrupt_Verifier:
+  [ !SharedKey(prover, $V, key) ]
+--[ Corrupted(prover, $V), Prelim(), Corrupt($V) ]->
+  [ Out(key), !CorruptVerifier($V) ]
+
+rule Corrupt_Fast:
+  [ !CorruptAgent(prover), In(msg) ]
+--[ CAction(prover), Action(prover) ]->
+  [ FastMsg(msg) ]
+
+// -------------------- Protocol Rules -------------------- //
+
+// The verifier sends their name to the prover
+
+rule Verifier_1:
+  [ !Agent(verifier) ]
+--[ VerifierOne(verifier) ]->
+  [ Out( verifier ), VerifierStart(verifier) ]
+
+// Now the verifier starts the fast phase with a nonce nv
+
+rule Verifier_2:
+  [ VerifierStart(verifier), Fr(~nv) ]
+--[ VerifierTwo(verifier, ~nv), StartFastPhase(verifier, ~nv) ]->
+  [ Out(~nv), VerifChallenge(verifier, ~nv) ]
+
+// The prover receives the first message and challenge. They
+// reply with f(nv, np, p) = nv||xor(np,p)
+// The prover also prepares the confirmation message they will
+// send after the fast phase.
+
+rule Prover_1:
+  [ Fr(~np), In( verifier ), In(nv), !SharedKey(prover, verifier, key) ]
+--[ ProverOne(prover, verifier, nv, ~np), Action(prover) ]->
+  [ FastMsg( f(nv, prover, ~np) ), ProverF(prover, <<prover, nv, ~np>, h(key, prover, nv, ~np) >) ]
+
+// The prover sends the slow message that they prepared in their
+// previous action.
+
+rule Prover_2:
+  [ ProverF( prover, msg ) ]
+--[ Action(prover), ProverTwo(prover, msg) ]->
+  [ Out( msg ) ]
+
+// The verifier receives the fast message send by Prover_1, ending the
+// fast phase
+
+rule Verifier_3:
+  [ FastMsg( f(nv, prover, np) ), VerifChallenge(verifier, nv), !SharedKey(prover, verifier, key) ]
+--[ EndFastPhase( verifier, nv ) ]->
+  [ VerifierPreFinal(verifier, nv, f(nv, prover, np) ) ]
+
+// The verifier checks the confirmation from the prover,
+// ending the protocol.
+// Two rules exist. Note in prover_2/verifier_2 the function
+// f(a,b,c) is defined to be a||xor(b,c), so the verifier
+// cannot distinguish between (<b,xor_nonce>,<c,xor_nonce>)
+// and (b,c) in the fast message, only in the confirmation.
+
+rule Verifier_4:
+  [ VerifierPreFinal(verifier, nv, f(nv, prover, np) ) ,
+   In( < <prover, nv, np>, h(key, prover, nv, np) >  ), 
+    !SharedKey( prover, verifier, key)]
+--[ VerifierComplete(prover, verifier, nv, np) ]->
+  []
+
+rule Verifier_4a:
+  [ VerifierPreFinal(verifier, nv, f(nv, prover, np) ) ,
+   In( < < <prover, xor_nonce>, nv, <np, xor_nonce> >, h(key, <prover,xor_nonce>, nv, <np,xor_nonce>) >  ), 
+    !SharedKey( <prover,xor_nonce>, verifier, key)]
+--[ VerifierComplete(<prover,xor_nonce>, verifier, nv, <np,xor_nonce>) ]->
+  []
+
+
+// ------------------- Axioms -------------------------- //
+
+axiom at_most_once:
+    "
+    All A V #t1 #t2. Once(A, V)@t1 & Once(A, V)@t2 ==>
+        (
+        #t1 = #t2
+        )
+    
+    
+    "
+
+// This restriction strengthens the security claim, but
+// adds noise to the output diagram.
+//axiom prelims_first:
+//    "
+//    All A #t1 #t2. Prelim()@t1 & Action(A)@t2 ==>
+//    (
+//        t1 < t2
+//    )
+//
+//    "    
+
+axiom prover_or_verif:
+  "
+  All A #t1 #t2. Prover(A)@t1 & Verifier(A)@t2 ==>
+    ( Ex #t3. Corrupt(A)@t3 )
+
+  "
+
+// -------------------- Sanity Check Lemmas -------------------- //
+
+lemma verif1_exists:
+    exists-trace
+  "
+    Ex V #t. (
+        VerifierOne( V)@t )
+  "
+
+lemma dirtykey_exists:
+    exists-trace
+  "
+    Ex P V key #t. (
+        DirtyKeyGen( P, V, key )@t )
+  "
+
+lemma prover1_exists:
+    exists-trace
+  "
+    Ex P V m n #t. (
+        ProverOne(P, V, m, n)@t )
+
+  "
+
+lemma prover2_exists:
+    exists-trace
+  "
+    Ex P msg #t. (
+        ProverTwo(P, msg)@t )
+
+  "
+
+lemma endfast_exists:
+    exists-trace
+  "
+    ( Ex verifier nv #t. (
+      EndFastPhase(verifier, nv)@t )
+    )
+  "
+
+lemma finish_exists:
+    exists-trace
+  "
+   ( Ex P V m n #t. (
+        VerifierComplete(P, V, m, n)@t )
+   ) &
+  not( Ex A B #t1. Corrupted(A, B)@t1 )
+  "
+
+lemma dirtyfinish_exists:
+    exists-trace
+  "
+   ( Ex P V altkey m n #t. (
+        VerifierComplete(<P, altkey>, V, m, n)@t )
+   ) &
+  not( Ex A B #t1. Corrupted(A, B)@t1 )
+  "
+
+
+// -------------------- Security Lemmas -------------------- //
+
+lemma dbsec:
+  "
+  All P V m n #t. (
+    VerifierComplete(P, V, m, n)@t ) ==>                   // Whenever the verifier is complete EITHER:
+    (Ex #tc. Corrupt(V)@tc)|                                  //  1) The verifier is corrupt OR
+    (                                                         
+      Ex #t1 #t2 #t3. StartFastPhase(V, m)@t1 &              //  2) There exists t1, t2 and t3 such that
+                  Action(P)@t2 &                              //          The fast phase was between t1 and t3
+                  EndFastPhase(V, m)@t3 &            //          and the prover did something between those two times
+                  (#t1 < #t2) &                               //          and the verifier completed at or after the
+                  (#t2 < #t3) &                               //          end of the fast phase OR
+                  ( (#t3 < #t ) | (#t3 = #t) )
+    )|
+    (              
+      Ex CAgent #t4 #t5 #t6 #t7. StartFastPhase(V, m)@t5 &    //  3) There exist times t5, t6 and t7 such that
+                             EndFastPhase(V, m)@t7 & //        The fast phase was between t5 and t7
+                             Corrupted(P, V)@t4 &             //        and the prover P is dishonest
+                             CAction(CAgent)@t6 &             //        and some dishonest agent did something during
+                             (#t5 < #t6)&                     //        the fast phase
+                             (#t6 < #t7)&                     //        and the verifier completed at or after the
+                             ( (#t7 < #t) | (#t7 = #t) )      //        end of the fast phase 
+    ) 
+  "
+
+
+end

@@ -1,0 +1,182 @@
+/* Implementation of the CRCS protocol */
+/* Demonstrating the DB-secure property */
+
+theory crcs
+
+begin
+
+functions: h/1
+
+builtins: symmetric-encryption, signing
+
+// -------------------- Tag Initialization -------------------- //
+
+rule Register_Keypair:
+  [ Fr(~key) ]
+--[ Once($A), Prelim()]->
+  [ !Pk($A, pk(~key)), !Ltk($A, ~key), Out(pk(~key)), !Agent($A) ]
+
+rule Corrupt_Agent:
+  [ !Ltk($A, ltk) ]
+--[ Corrupt($A), Prelim() ]->
+  [ Out(ltk), !CorruptAgent($A) ]
+
+rule Corrupt_Fast:
+  [ !CorruptAgent($A), In(msg) ]
+--[ CAction($A), Action($A) ]->
+  [ FastMsg(msg) ]
+
+// -------------------- Protocol Rules -------------------- //
+
+// The prover sends out a signed commitment of an encrypted nonce
+
+rule Prover_1:
+  let signed_msg = <h(~commit), sign(h(~commit), ltk)>
+  in
+  [ Fr(~commit), !Ltk($Prover, ltk) ]
+--[ ProverStart($Prover, ~commit), Action($Prover) ]->
+  [ Out( signed_msg ), ProverSess($Prover, ~commit) ]
+
+// The verifier receives a sealed commit and confirms that the
+// signature is valid. They send a nonce, starting the fast phase.
+// The sealed commit is saved until later
+
+rule Verifier_1:
+  let conf_sign = verify( sig, sealed_commit, pk)
+  in
+  [ In( <sealed_commit, sig> ), Fr(~nv), !Pk($P, pk) ]
+--[ StartFastPhase($P, ~nv),
+    Eq(true, conf_sign) ]->
+  [ Out(~nv), VerifierStart($P, sealed_commit, ~nv) ]
+
+// The prover responds to the challenge with a function of the the
+// challenge message as well as the contents of their commit.
+// They prepare to send the unbundling of their commit.
+
+rule Prover_2:
+  [ In(nv), ProverSess($Prover, commit) ]
+--[ ProverReply($Prover, nv),
+	 Action($Prover) ]->
+  [ FastMsg( h(<nv, commit>) ), ProverPreFinal($Prover, commit, nv) ]
+
+// The prover sends the unwrapping of their commit.
+
+rule Prover_3:
+  let msg = < $P, commit, nv >
+      sig = sign(msg, ltk)
+  in
+  [ ProverPreFinal($P, commit, nv), !Ltk($P, ltk) ]
+--[ Action($P), ProverFinish($P, commit, nv) ]->
+  [ Out( <msg, sig> ) ]
+
+// The verifier receives the response to the fast phase message.
+// He cannot verify that the response is valid yet, but he'll remember it.
+
+rule Verifier_2:
+  [ VerifierStart($P, sealed_commit, nv), FastMsg(reply) ]  
+--[ EndFastPhase($P, nv) ]->
+  [ VerifierPreFinal($P, sealed_commit, nv, reply) ]
+
+// The verifier receives the commit unwrapper and checks
+// everything lines up
+
+rule Verifier_3:
+  let msg = <$P, commit, nv>
+      sealed_commit = h(commit)
+      check_sig = verify(sig, msg, pk)
+      reply = h(<nv, commit>)
+  in
+  [ VerifierPreFinal($P, sealed_commit, nv, reply), In(<msg, sig>), !Pk($P, pk)  ]
+--[ VerifierComplete($P, commit, nv), Eq(check_sig, true) ]->
+  []
+
+// ------------------- Axioms -------------------------- //
+
+axiom at_most_once:
+    "
+    All A #t1 #t2. Once(A)@t1 & Once(A)@t2 ==>
+        (
+        #t1 = #t2
+        )
+    "
+
+
+//axiom prelims_first:
+//    "
+//   All A #t1 #t2. Prelim()@t1 & Action(A)@t2 ==>
+//    (
+//        t1 < t2
+//    )
+//
+//    "    
+    
+axiom equals:
+    "
+    All a b #t1. Eq(a,b)@t1 ==>
+    (
+        a = b
+    )
+    "
+// -------------------- Sanity Check Lemmas -------------------- //
+
+lemma veriftwo_exists:
+  exists-trace
+  "
+  Ex P nv #t.
+    ( EndFastPhase(P, nv)@t )
+  "
+
+lemma proverthree_exists:
+  exists-trace
+  "
+  Ex P commit nv #t.
+    ( ProverFinish(P, commit, nv)@t )
+  "
+
+lemma finish_exists:
+  exists-trace
+  "
+  Ex P commit nv #t.
+    ( VerifierComplete(P, commit, nv)@t )
+  &  
+  not( Ex A #t1. Corrupt(A)@t1 )
+  "
+
+lemma happytrace_exists:
+  exists-trace
+  "
+    Ex Prover challenge commit #t1 #t2 #t3 #t4. (
+      ProverStart(Prover, commit)@t1 &
+      StartFastPhase( Prover, challenge )@t2 &
+      EndFastPhase( Prover,challenge )@t3 &
+      VerifierComplete( Prover, commit, challenge )@t4 &
+      (#t1 < #t2) & (#t2 < #t3) & (#t3 < #t4)
+    )
+  "
+
+// -------------------- Security Lemmas -------------------- //
+
+lemma dbsec:
+  "
+  All P nv commit #t. (
+    VerifierComplete(P, commit, nv)@t ) ==>                   // Whenever the verifier is complete EITHER:
+    (                                                         
+      Ex #t1 #t2 #t3. StartFastPhase(P, nv)@t1 &              //  2) There exists t1, t2 and t3 such that
+                  Action(P)@t2 &                              //          The fast phase was between t1 and t3
+                  EndFastPhase(P, nv)@t3 &            //          and the prover did something between those two times
+                  (#t1 < #t2) &                               //          and the verifier completed at or after the
+                  (#t2 < #t3) &                               //          end of the fast phase OR
+                  ( (#t3 < #t ) | (#t3 = #t) )
+    )|
+    (              
+      Ex CAgent #t4 #t5 #t6 #t7. StartFastPhase(P, nv)@t5 &    //  3) There exist times t5, t6 and t7 such that
+                             EndFastPhase(P, nv)@t7 & //        The fast phase was between t5 and t7
+                             Corrupt(P)@t4 &             //        and the prover P is dishonest
+                             CAction(CAgent)@t6 &             //        and some dishonest agent did something during
+                             (#t5 < #t6)&                     //        the fast phase
+                             (#t6 < #t7)&                     //        and the verifier completed at or after the
+                             ( (#t7 < #t) | (#t7 = #t) )      //        end of the fast phase 
+    ) 
+  "
+
+end
