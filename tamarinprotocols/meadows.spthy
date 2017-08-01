@@ -186,16 +186,6 @@ lemma finish_exists:
   not( Ex A B #t1. Corrupted(A, B)@t1 )
   "
 
-lemma dirtyfinish_exists:
-    exists-trace
-  "
-   ( Ex P V altkey m n #t. (
-        VerifierComplete(<P, altkey>, V, m, n)@t )
-   ) &
-  not( Ex A B #t1. Corrupted(A, B)@t1 )
-  "
-
-
 // -------------------- Security Lemmas -------------------- //
 
 lemma dbsec:

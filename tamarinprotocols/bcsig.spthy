@@ -1,0 +1,185 @@
+/* Implementation of the brands-chaum distance bounding protocol with signature */
+/* Demonstrating the DB-secure property */
+
+theory bcsig
+
+begin
+
+functions: h/1, f/2
+
+builtins: symmetric-encryption, signing
+
+// -------------------- Tag Initialization -------------------- //
+
+rule Register_Keypair:
+  [ Fr(~key) ]
+--[ Once($A), Prelim()]->
+  [ !Pk($A, pk(~key)), !Ltk($A, ~key), Out(pk(~key)), !Agent($A) ]
+
+rule Corrupt_Agent:
+  [ !Ltk($A, ltk) ]
+--[ Corrupt($A), Prelim() ]->
+  [ Out(ltk), !CorruptAgent($A) ]
+
+rule Corrupt_Fast:
+  [ !CorruptAgent($A), In(msg) ]
+--[ CAction($A), Action($A) ]->
+  [ FastMsg(msg) ]
+
+// -------------------- Protocol Rules -------------------- //
+
+// The prover chooses a nonce and encrypts it with a secret
+// commitment key
+
+rule Prover_1:
+  [ Fr(~commit), Fr(~commitkey), !Agent($Prover) ]
+--[ ProverStart($Prover, ~commit, ~commitkey), Action($Prover) ]->
+  [ Out( senc(~commit, ~commitkey) ), ProverSess($Prover, ~commit, ~commitkey) ]
+
+// The verifier acknowledges the sealed commitment, and then
+// starts the fast phase with a challenge
+
+rule Verifier_1:
+  [ In( sealedcommit ), Fr(~challenge) ]
+--[ VerifierCommit(~challenge), StartFastPhase(~challenge) ]->
+  [ Out(~challenge), VerifierStart(sealedcommit, ~challenge) ]
+
+// The prover receives the challenge. They send back the
+// xor of the challenge with their commit (abstracted to hash).
+// They also prepare the final message which will unwrap the commit
+
+
+rule Prover_2:
+  let msg = f(commitkey, challenge)
+  in
+  [ In(challenge), ProverSess($Prover, commit, commitkey), !Ltk($Prover, ltk)]
+--[ ProverFinish($Prover, commit, commitkey, challenge),
+	 ProverReply($Prover, challenge),
+	 Action($Prover) ]->
+  [ FastMsg( h( <commit, challenge> ) ), ProverPreFinal($Prover, <msg, sign(msg, ltk )>) ]
+
+// The prover sends their final message
+
+rule Prover_3:
+  [ ProverPreFinal($Prover, signed_msg ) ]
+--[ ProverSig(signed_msg), Action($Prover) ]->
+  [ Out(signed_msg) ]
+
+// The verifier receives the xor of the challenge
+// with some unknown value, and retreives it.
+
+rule Verifier_2:
+  let challenge_response = h(< commit, challenge >)
+  in
+  [ VerifierStart(sealedcommit, challenge), FastMsg( challenge_response ) ]
+--[ EndFastPhase( challenge ) ]->
+  [ VerifierPreFinal( sealedcommit, commit, challenge ) ]
+
+// The verifier receives the commit unwrapper, and checks that
+// everything lines up correctly
+
+rule Verifier_3:
+  let msg = f(commitkey, challenge)
+      msg_in = <msg, signature>
+      conf_sign = verify(signature, msg, pk)
+  in
+  [ VerifierPreFinal( senc(commit, commitkey) , commit, challenge ), In( msg_in ),
+   !Pk($Prover, pk) ]
+--[ Eq(conf_sign, true),
+    VerifierComplete($Prover, commit, challenge)]->
+  []
+
+// ------------------- Axioms -------------------------- //
+
+axiom at_most_once:
+    "
+    All A #t1 #t2. Once(A)@t1 & Once(A)@t2 ==>
+        (
+        #t1 = #t2
+        )
+    "
+
+
+//axiom prelims_first:
+//    "
+//    All A #t1 #t2. Prelim()@t1 & Action(A)@t2 ==>
+//    (
+//        t1 < t2
+//    )
+//
+//    "    
+    
+axiom equals:
+    "
+    All a b #t1. Eq(a,b)@t1 ==>
+    (
+        a = b
+    )
+    "
+// -------------------- Sanity Check Lemmas -------------------- //
+
+lemma verif1_exists:
+    exists-trace
+  "
+    Ex challenge #t. (
+        VerifierCommit( challenge )@t )
+  "
+
+lemma prover2_exists:
+    exists-trace
+  "
+    Ex Prover commit commitkey challenge #t. (
+        ProverFinish( Prover, commit, commitkey, challenge )@t )
+
+  "
+
+lemma verif2_exists:
+  exists-trace
+  "
+    Ex Prover commit challenge  #t. (
+      VerifierComplete(Prover, commit, challenge)@t
+    )
+  "
+
+lemma happytrace_exists:
+  exists-trace
+  "
+    Ex Prover challenge commit commitkey #t1 #t2 #t3 #t4. (
+      ProverStart(Prover, commit, commitkey)@t1 &
+      VerifierCommit( challenge )@t2 &
+      ProverFinish( Prover, commit, commitkey, challenge )@t3 &
+      VerifierComplete(Prover, commit, challenge)@t4 &
+      (#t1 < #t2) & (#t2 < #t3) & (#t3 < #t4)
+    )
+  "
+
+// -------------------- Security Lemmas -------------------- //
+
+
+lemma dbsec:
+  "
+  All P commit challenge  #t. (
+    VerifierComplete(P, commit, challenge)@t ) ==>                   // Whenever the verifier is complete EITHER:
+    //(
+    //  Ex #t0. Corrupt(V)@t0                                         (verifier can't be corrupted in this protocol)
+    //)|  
+    (                                                         
+      Ex #t1 #t2 #t3. StartFastPhase( challenge )@t1 &              //  2) There exists t1, t2 and t3 such that
+                  Action(P)@t2 &                              //          The fast phase was between t1 and t3
+                  EndFastPhase( challenge )@t3 &            //          and the prover did something between those two times
+                  (#t1 < #t2) &                               //          and the verifier completed at or after the
+                  (#t2 < #t3) &                               //          end of the fast phase OR
+                  ( (#t3 < #t ) | (#t3 = #t) )
+    )|
+    (              
+      Ex CAgent #t4 #t5 #t6 #t7. StartFastPhase( challenge )@t5 &    //  3) There exist times t5, t6 and t7 such that
+                             EndFastPhase( challenge )@t7 & //        The fast phase was between t5 and t7
+                             Corrupt(P)@t4 &             //        and the prover P is dishonest
+                             CAction(CAgent)@t6 &             //        and some dishonest agent did something during
+                             (#t5 < #t6)&                     //        the fast phase
+                             (#t6 < #t7)&                     //        and the verifier completed at or after the
+                             ( (#t7 < #t) | (#t7 = #t) )      //        end of the fast phase 
+    ) 
+  "
+
+end

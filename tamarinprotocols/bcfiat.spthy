@@ -1,0 +1,189 @@
+/* Implementation of the brands-chaum distance bounding protocol with fiat-shamir identification */
+/* Demonstrating the DB-secure property */
+
+theory bcfiatshamir
+
+begin
+
+functions: sq/1, mulli/2, f/2, xor/2, pkey/1, chrep/2
+
+equations: mulli( sq(<r, f(x, challenge)>), f(pkey(x), challenge) ) = sq(r)
+
+builtins: symmetric-encryption
+
+// -------------------- Tag Initialization -------------------- //
+
+rule Register_Keypair:
+  [ Fr(~key) ]
+--[ Once($A), Prelim()]->
+  [ !Pk($A, pkey(~key)), !Ltk($A, ~key), Out(pkey(~key)), !Agent($A) ]
+
+rule Corrupt_Agent:
+  [ !Ltk($A, ltk) ]
+--[ Corrupt($A), Prelim() ]->
+  [ Out(ltk), !CorruptAgent($A) ]
+
+rule Corrupt_Fast:
+  [ !CorruptAgent($A), In(msg) ]
+--[ CAction($A), Action($A) ]->
+  [ FastMsg(msg) ]
+
+// -------------------- Protocol Rules -------------------- //
+
+// The prover chooses a nonce and encrypts it with a secret
+// commitment key. They also choose an temporary key for the proof
+// of knowledge phase
+
+rule Prover_1:
+  [ Fr(~r), Fr(~commit), Fr(~commitkey), !Agent($Prover) ]
+--[ ProverStart($Prover, ~commit, ~commitkey), Action($Prover) ]->
+  [ Out( < sq(~r), senc(~commit, ~commitkey) > ), ProverSess($Prover, ~commit, ~commitkey, ~r) ]
+
+// The verifier acknowledges the sealed commitment, and then
+// starts the fast phase with a challenge
+
+rule Verifier_1:
+  [ In( <t, sealedcommit> ), Fr(~challenge) ]
+--[ VerifierCommit(~challenge), StartFastPhase(~challenge) ]->
+  [ Out(~challenge), VerifierStart(sealedcommit, ~challenge, t) ]
+
+// The prover receives the challenge. They send back just the
+// nonce they commited earlier.
+
+rule Prover_2:
+  [ In(challenge), ProverSess($Prover, commit, commitkey, r)]
+--[ ProverFinish($Prover, commit, commitkey, challenge),
+	 ProverReply($Prover, challenge),
+	 Action($Prover) ]->
+  [ ProverPreFinal($Prover, commit, commitkey, r, challenge),
+    // FastMsg( commit )  ] // This is the 'mk1' version in the paper
+    FastMsg( xor(commit, challenge) ) ] // This is with the obvious XOR-improvement
+
+// The prover sends their final message. It consists of
+// the unwrapper for their earlier commit, and
+// a function of the messages sent in the fast phase
+
+rule Prover_3:
+  let proof_challenge = xor(commit, challenge)
+      s = sq(<r, f(ltk, proof_challenge) >)
+  in
+  [ ProverPreFinal($Prover, commit, commitkey, r, challenge), !Ltk($Prover, ltk) ]
+--[ Action($Prover) ]->
+  [ Out(< s, commitkey>) ]
+
+// The verifier receives the reply from the fast phase, and stores it
+
+rule Verifier_2:
+  [ VerifierStart(sealedcommit, challenge, t), 
+    // FastMsg( commit ) ] // This is the 'mk1' version in the paper
+    FastMsg( xor(commit, challenge) ) ] // This is with the obvious XOR-improvement
+--[ EndFastPhase( challenge ) ]->
+  [ VerifierPreFinal( sealedcommit, commit, challenge, t ) ]
+
+// The verifier receives the commit unwrapper, and checks that
+// everything lines up correctly for both the fast phase proof
+// and the zero-knowledge/secret key proof
+
+rule Verifier_3:
+  let proof_challenge = xor(commit, challenge)
+      eqtest = mulli(s, f(pk, proof_challenge))
+  in
+  [ VerifierPreFinal( senc(commit, commitkey) , commit, challenge, t ), In(< s, commitkey> ),
+   !Pk($Prover, pk) ]
+--[ Eq(eqtest, t),
+    VerifierComplete($Prover, commit, challenge), Fact(eqtest)]->
+  []
+
+// ------------------- Axioms -------------------------- //
+
+axiom at_most_once:
+    "
+    All A #t1 #t2. Once(A)@t1 & Once(A)@t2 ==>
+        (
+        #t1 = #t2
+        )
+    "
+
+
+//axiom prelims_first:
+//    "
+//    All A #t1 #t2. Prelim()@t1 & Action(A)@t2 ==>
+//    (
+//        t1 < t2
+//    )
+//
+//    "    
+    
+axiom equals:
+    "
+    All a b #t1. Eq(a,b)@t1 ==>
+    (
+        a = b
+    )
+    "
+// -------------------- Sanity Check Lemmas -------------------- //
+
+lemma verif1_exists:
+    exists-trace
+  "
+    Ex challenge #t. (
+        VerifierCommit( challenge )@t )
+  "
+
+lemma prover2_exists:
+    exists-trace
+  "
+    Ex Prover commit commitkey challenge #t. (
+        ProverFinish( Prover, commit, commitkey, challenge )@t )
+
+  "
+
+lemma endfast_exists:
+  exists-trace
+  "
+    Ex challenge  #t. (
+      EndFastPhase(challenge)@t
+    ) &
+    not(Ex A #tc. Corrupt(A)@tc)
+  "
+
+lemma end_exists:
+  exists-trace
+  "
+    Ex P commit challenge  #t. (
+      VerifierComplete(P, commit, challenge)@t
+    ) &
+    not(Ex A #tc. Corrupt(A)@tc)
+  "
+
+
+// -------------------- Security Lemmas -------------------- //
+
+
+lemma dbsec:
+  "
+  All P commit challenge  #t. (
+    VerifierComplete(P, commit, challenge)@t ) ==>                   // Whenever the verifier is complete EITHER:
+    //(
+    //  Ex #t0. Corrupt(V)@t0                                         (verifier can't be corrupted in this protocol)
+    //)|  
+    (                                                         
+      Ex #t1 #t2 #t3. StartFastPhase( challenge )@t1 &              //  2) There exists t1, t2 and t3 such that
+                  Action(P)@t2 &                              //          The fast phase was between t1 and t3
+                  EndFastPhase( challenge )@t3 &            //          and the prover did something between those two times
+                  (#t1 < #t2) &                               //          and the verifier completed at or after the
+                  (#t2 < #t3) &                               //          end of the fast phase OR
+                  ( (#t3 < #t ) | (#t3 = #t) )
+    )|
+    (              
+      Ex CAgent #t4 #t5 #t6 #t7. StartFastPhase( challenge )@t5 &    //  3) There exist times t5, t6 and t7 such that
+                             EndFastPhase( challenge )@t7 & //        The fast phase was between t5 and t7
+                             Corrupt(P)@t4 &             //        and the prover P is dishonest
+                             CAction(CAgent)@t6 &             //        and some dishonest agent did something during
+                             (#t5 < #t6)&                     //        the fast phase
+                             (#t6 < #t7)&                     //        and the verifier completed at or after the
+                             ( (#t7 < #t) | (#t7 = #t) )      //        end of the fast phase 
+    ) 
+  "
+
+end
