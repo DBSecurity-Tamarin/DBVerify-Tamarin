@@ -103,11 +103,13 @@ rule Verifier_4a:
   [ VerifierPreFinal(verifier, nv, f(nv, prover, np) ) ,
    In( < < <prover, xor_nonce>, nv, <np, xor_nonce> >, h(key, <prover,xor_nonce>, nv, <np,xor_nonce>) >  ), 
     !SharedKey( <prover,xor_nonce>, verifier, key)]
---[ VerifierComplete(<prover,xor_nonce>, verifier, nv, <np,xor_nonce>) ]->
+--[ VerifierDirtyComplete(<prover,xor_nonce>, verifier, nv, <np,xor_nonce>),
+	VerifierComplete(<prover,xor_nonce>, verifier, nv, <np,xor_nonce>) ]->
   []
 
 
 // ------------------- Axioms -------------------------- //
+
 
 axiom at_most_once:
     "
@@ -124,7 +126,7 @@ axiom at_most_once:
 //axiom prelims_first:
 //    "
 //    All A #t1 #t2. Prelim()@t1 & Action(A)@t2 ==>
-//    (
+//    
 //        t1 < t2
 //    )
 //
@@ -177,6 +179,13 @@ lemma endfast_exists:
     )
   "
 
+lemma dirtyfinish_exists:
+    exists-trace
+  "
+   ( Ex P V m n #t. (
+        VerifierComplete(P, V, m, n)@t )
+   )
+  "
 lemma finish_exists:
     exists-trace
   "
